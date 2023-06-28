@@ -4,8 +4,12 @@ import torch.nn.functional as F
 from .resnet import ResidualBlock1D, ResidualBlock2D
 from .se import SEBlock
 
+num_labels = 52
+
+
 class Conv2d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, relu=True, same_padding=False, bn=False):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, relu=True, same_padding=False, bn=False,
+                 num_labels=52):
         super(Conv2d, self).__init__()
         p0 = int((kernel_size[0] - 1) / 2) if same_padding else 0
         p1 = int((kernel_size[1] - 1) / 2) if same_padding else 0
@@ -13,6 +17,8 @@ class Conv2d(nn.Module):
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=padding)
         self.bn = nn.BatchNorm2d(out_channels) if bn else None
         self.relu = nn.ReLU(inplace=True) if relu else None
+        self.fc = nn.Linear(out_channels, num_labels)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         x = self.conv(x)
@@ -20,32 +26,37 @@ class Conv2d(nn.Module):
             x = self.bn(x)
         if self.relu is not None:
             x = self.relu(x)
+        x = x.mean(dim=[2, 3])  # Global average pooling
+        x = self.fc(x)
+        x = self.sigmoid(x)
         return x
 
-class PrismNet(nn.Module):
-    def __init__(self, mode="pu"):
+
+class PrismNet_large(nn.Module):
+    def __init__(self, mode="pu", num_labels=1):
         super(PrismNet, self).__init__()
         self.mode = mode
-        h_p, h_k = 2, 5 
-        if mode=="pu":
+        h_p, h_k = 2, 5
+        if mode == "pu":
             self.n_features = 5
-        elif mode=="seq":
+        elif mode == "seq":
             self.n_features = 4
-            h_p, h_k = 1, 3 
-        elif mode=="str":
+            h_p, h_k = 1, 3
+        elif mode == "str":
             self.n_features = 1
             h_p, h_k = 0, 1
         else:
-            raise "mode error"
-        
+            raise ValueError("mode error")
+
         base_channel = 8
-        self.conv    = Conv2d(1, base_channel, kernel_size=(11, h_k), bn = True, same_padding=True)
-        self.se      = SEBlock(base_channel)
-        self.res2d   = ResidualBlock2D(base_channel, kernel_size=(11, h_k), padding=(5, h_p)) 
-        self.res1d   = ResidualBlock1D(base_channel*4) 
-        self.avgpool = nn.AvgPool2d((1,self.n_features))
-        self.gpool   = nn.AdaptiveAvgPool1d(1)
-        self.fc      = nn.Linear(base_channel*4*8, 1)
+        self.conv = Conv2d(1, base_channel, kernel_size=(11, h_k), bn=True, same_padding=True)
+        self.se = SEBlock(base_channel)
+        self.res2d = ResidualBlock2D(base_channel, kernel_size=(11, h_k), padding=(5, h_p))
+        self.res1d = ResidualBlock1D(base_channel * 4)
+        self.avgpool = nn.AvgPool2d((1, self.n_features))
+        self.gpool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Linear(base_channel * 4 * 8, num_labels)
+        self.sigmoid = nn.Sigmoid()
         self._initialize_weights()
 
     def _initialize_weights(self):
@@ -67,21 +78,21 @@ class PrismNet(nn.Module):
             elif isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.constant_(m.bias, 0)
-    
+
     def forward(self, input):
         """[forward]
         
         Args:
             input ([tensor],N,C,W,H): input features
         """
-        if self.mode=="seq":
-            input = input[:,:,:,:4]
-        elif self.mode=="str":
-            input = input[:,:,:,4:]
+        if self.mode == "seq":
+            input = input[:, :, :, :4]
+        elif self.mode == "str":
+            input = input[:, :, :, 4:]
         x = self.conv(input)
         x = F.dropout(x, 0.1, training=self.training)
         z = self.se(x)
-        x = self.res2d(x*z)
+        x = self.res2d(x * z)
         x = F.dropout(x, 0.5, training=self.training)
         x = self.avgpool(x)
         x = x.view(x.shape[0], x.shape[1], x.shape[2])
@@ -90,33 +101,35 @@ class PrismNet(nn.Module):
         x = self.gpool(x)
         x = x.view(x.shape[0], x.shape[1])
         x = self.fc(x)
+        x = self.sigmoid(x)
         return x
 
 
-class PrismNet_large(nn.Module):
-    def __init__(self, mode="pu"):
-        super(PrismNet_large, self).__init__()
+class PrismNet(nn.Module):
+    def __init__(self, mode="pu", num_labels=1):
+        super(PrismNet, self).__init__()
         self.mode = mode
-        h_p, h_k = 2, 5 
-        if mode=="pu":
+        h_p, h_k = 2, 5
+        if mode == "pu":
             self.n_features = 5
-        elif mode=="seq":
+        elif mode == "seq":
             self.n_features = 4
-            h_p, h_k = 1, 3 
-        elif mode=="str":
+            h_p, h_k = 1, 3
+        elif mode == "str":
             self.n_features = 1
             h_p, h_k = 0, 1
         else:
-            raise "mode error"
-        
-        base_channel = 64
-        self.conv    = Conv2d(1, base_channel, kernel_size=(11, h_k), bn = True, same_padding=True)
-        self.se      = SEBlock(base_channel)
-        self.res2d   = ResidualBlock2D(base_channel, kernel_size=(11, h_k), padding=(5, h_p)) 
-        self.res1d   = ResidualBlock1D(base_channel*4) 
-        self.avgpool = nn.AvgPool2d((1,self.n_features))
-        self.gpool   = nn.AdaptiveAvgPool1d(1)
-        self.fc      = nn.Linear(base_channel*4*8, 1)
+            raise ValueError("mode error")
+
+        base_channel = 8
+        self.conv = Conv2d(1, base_channel, kernel_size=(11, h_k), bn=True, same_padding=True)
+        self.se = SEBlock(base_channel)
+        self.res2d = ResidualBlock2D(base_channel, kernel_size=(11, h_k), padding=(5, h_p))
+        self.res1d = ResidualBlock1D(base_channel * 4)
+        self.avgpool = nn.AvgPool2d((1, self.n_features))
+        self.gpool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Linear(base_channel * 4 * 8, num_labels)
+        self.sigmoid = nn.Sigmoid()
         self._initialize_weights()
 
     def _initialize_weights(self):
@@ -138,21 +151,21 @@ class PrismNet_large(nn.Module):
             elif isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.constant_(m.bias, 0)
-    
+
     def forward(self, input):
-        """[summary]
-        
+        """[forward]
+
         Args:
             input ([tensor],N,C,W,H): input features
         """
-        if self.mode=="seq":
-            input = input[:,:,:,:4]
-        elif self.mode=="str":
-            input = input[:,:,:,4:]
+        if self.mode == "seq":
+            input = input[:, :, :, :4]
+        elif self.mode == "str":
+            input = input[:, :, :, 4:]
         x = self.conv(input)
         x = F.dropout(x, 0.1, training=self.training)
         z = self.se(x)
-        x = self.res2d(x*z)
+        x = self.res2d(x * z)
         x = F.dropout(x, 0.5, training=self.training)
         x = self.avgpool(x)
         x = x.view(x.shape[0], x.shape[1], x.shape[2])
@@ -161,4 +174,7 @@ class PrismNet_large(nn.Module):
         x = self.gpool(x)
         x = x.view(x.shape[0], x.shape[1])
         x = self.fc(x)
+        x = self.sigmoid(x)
         return x
+
+
